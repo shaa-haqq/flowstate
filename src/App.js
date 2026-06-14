@@ -9,12 +9,15 @@ const initialState = {
   entries: [],
   expenses: [],
   monthlyBudget: {},
+  openingBalance: { btc: 0, usdt: 0, usd: 0, set: false, date: null },
 };
 
 function loadState() {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    return raw ? JSON.parse(raw) : initialState;
+    if (!raw) return initialState;
+    const parsed = JSON.parse(raw);
+    return { ...initialState, ...parsed, openingBalance: parsed.openingBalance || initialState.openingBalance };
   } catch { return initialState; }
 }
 
@@ -54,6 +57,7 @@ export default function App() {
   const [manualExpense, setManualExpense] = useState({ category: "Rent", amount: "", note: "", date: today() });
   const [filterSource, setFilterSource] = useState("All");
   const [filterMonth, setFilterMonth] = useState(today().slice(0, 7));
+  const [obForm, setObForm] = useState({ btc: "", usdt: "", usd: "" });
 
   // Fetch BTC price
   const fetchBTC = useCallback(async () => {
@@ -126,7 +130,7 @@ Respond ONLY with valid JSON in this exact shape:
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", "x-api-key": process.env.REACT_APP_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-direct-browser-access": "true" },
         body: JSON.stringify({
           model: "claude-sonnet-4-6",
           max_tokens: 1000,
@@ -213,6 +217,19 @@ Respond ONLY with valid JSON in this exact shape:
     setManualExpense(m => ({ ...m, amount: "", note: "" }));
   }
 
+  function setOpeningBalance() {
+    setState(s => ({
+      ...s,
+      openingBalance: {
+        btc: parseFloat(obForm.btc) || 0,
+        usdt: parseFloat(obForm.usdt) || 0,
+        usd: parseFloat(obForm.usd) || 0,
+        set: true,
+        date: today(),
+      }
+    }));
+  }
+
   function deleteEntry(id) {
     setState(s => ({ ...s, entries: s.entries.filter(e => e.id !== id) }));
   }
@@ -234,6 +251,18 @@ Respond ONLY with valid JSON in this exact shape:
   function getMonthExpenses(m) {
     return state.expenses.filter(e => monthKey(e.date) === m);
   }
+
+  // All-time total balance = opening balance + all income - all expenses
+  const allTimeBTC = state.entries.filter(e => e.currency === "BTC").reduce((s, e) => s + (e.amount || 0), 0);
+  const allTimeUSDT = state.entries.filter(e => e.currency === "USDT").reduce((s, e) => s + (e.amount || 0), 0);
+  const allTimeUSDFromIncome = state.entries.filter(e => e.currency === "USD").reduce((s, e) => s + (e.amount || 0), 0);
+  const allTimeExpenses = state.expenses.reduce((s, e) => s + (e.amount || 0), 0);
+
+  const totalBTCHoldings = (state.openingBalance?.btc || 0) + allTimeBTC;
+  const totalUSDTHoldings = (state.openingBalance?.usdt || 0) + allTimeUSDT;
+  const totalUSDHoldings = (state.openingBalance?.usd || 0) + allTimeUSDFromIncome - allTimeExpenses;
+  const totalBTCValueUSD = btcPrice ? totalBTCHoldings * btcPrice : null;
+  const grandTotalUSD = (totalBTCValueUSD || 0) + totalUSDTHoldings + totalUSDHoldings;
 
   const filteredEntries = state.entries
     .filter(e => monthKey(e.date) === filterMonth)
@@ -317,12 +346,13 @@ Respond ONLY with valid JSON in this exact shape:
       </div>
 
       {/* Summary bar */}
-      <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: "1px", background: "#e0e0dc", borderBottom: "1px solid #e0e0dc" }}>
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: "1px", background: "#e0e0dc", borderBottom: "1px solid #e0e0dc" }}>
         {[
           { label: "Income (mo)", value: formatUSD(totalIncomeUSD), color: "#16a34a" },
           { label: "Expenses (mo)", value: formatUSD(totalExpenseUSD), color: "#dc2626" },
           { label: "Net (mo)", value: formatUSD(netUSD), color: netUSD >= 0 ? "#16a34a" : "#dc2626" },
           { label: "BTC held (mo)", value: btcCurrentValue != null ? `${formatBTC(totalBTC)}\n${formatUSD(btcCurrentValue)}` : formatBTC(totalBTC), color: "#b45309" },
+          { label: "Total Balance", value: state.openingBalance?.set ? formatUSD(grandTotalUSD) : "Not set", color: "#0369a1" },
         ].map(({ label, value, color }) => (
           <div key={label} style={{ background: "#f8f8f6", padding: "14px 20px" }}>
             <div style={{ fontSize: "9px", color: "#666662", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "4px" }}>{label}</div>
@@ -333,7 +363,7 @@ Respond ONLY with valid JSON in this exact shape:
 
       {/* Tabs */}
       <div style={{ display: "flex", borderBottom: "1px solid #e0e0dc", background: "#f8f8f6", paddingLeft: "12px" }}>
-        {["checkin", "manual", "ledger", "analytics"].map(t => (
+        {["checkin", "manual", "ledger", "analytics", "settings"].map(t => (
           <button key={t} style={tabStyle(t)} onClick={() => setTab(t)}>{t}</button>
         ))}
       </div>
@@ -618,6 +648,58 @@ Respond ONLY with valid JSON in this exact shape:
             <div style={{ marginTop: "24px", background: "#f8f8f6", border: `1px solid ${netUSD >= 0 ? "#16a34a33" : "#dc262633"}`, borderRadius: "6px", padding: "16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
               <div style={{ fontSize: "12px", color: "#666662" }}>Net for {filterMonth}</div>
               <div style={{ fontSize: "24px", fontWeight: "700", color: netUSD >= 0 ? "#16a34a" : "#dc2626" }}>{formatUSD(netUSD)}</div>
+            </div>
+          </div>
+        )}
+
+        {/* SETTINGS TAB */}
+        {tab === "settings" && (
+          <div>
+            <div style={{ fontSize: "11px", color: "#666662", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "16px" }}>Opening Balance</div>
+
+            {state.openingBalance?.set ? (
+              <div style={{ background: "#f8f8f6", border: "1px solid #e0e0dc", borderRadius: "6px", padding: "16px", marginBottom: "20px" }}>
+                <div style={{ fontSize: "11px", color: "#666662", marginBottom: "10px" }}>Set on {state.openingBalance.date}</div>
+                <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px" }}>
+                  <div>
+                    <div style={{ fontSize: "9px", color: "#666662", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "4px" }}>BTC</div>
+                    <div style={{ fontSize: "16px", fontWeight: "700", color: "#b45309" }}>{formatBTC(state.openingBalance.btc)}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "9px", color: "#666662", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "4px" }}>USDT</div>
+                    <div style={{ fontSize: "16px", fontWeight: "700", color: "#0369a1" }}>{state.openingBalance.usdt}</div>
+                  </div>
+                  <div>
+                    <div style={{ fontSize: "9px", color: "#666662", letterSpacing: "0.15em", textTransform: "uppercase", marginBottom: "4px" }}>USD</div>
+                    <div style={{ fontSize: "16px", fontWeight: "700", color: "#16a34a" }}>{formatUSD(state.openingBalance.usd)}</div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div style={{ fontSize: "12px", color: "#888884", marginBottom: "16px" }}>
+                No opening balance set yet. Set it once below — it becomes the baseline for your Total Balance figure, separate from per-stream income tracking.
+              </div>
+            )}
+
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: "12px", marginBottom: "12px" }}>
+              <div>
+                <div style={{ fontSize: "10px", color: "#666662", marginBottom: "4px", letterSpacing: "0.1em", textTransform: "uppercase" }}>BTC</div>
+                <input type="number" step="any" placeholder="0.00000000" value={obForm.btc} onChange={e => setObForm(f => ({ ...f, btc: e.target.value }))} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: "10px", color: "#666662", marginBottom: "4px", letterSpacing: "0.1em", textTransform: "uppercase" }}>USDT</div>
+                <input type="number" step="any" placeholder="0.00" value={obForm.usdt} onChange={e => setObForm(f => ({ ...f, usdt: e.target.value }))} style={inputStyle} />
+              </div>
+              <div>
+                <div style={{ fontSize: "10px", color: "#666662", marginBottom: "4px", letterSpacing: "0.1em", textTransform: "uppercase" }}>USD</div>
+                <input type="number" step="any" placeholder="0.00" value={obForm.usd} onChange={e => setObForm(f => ({ ...f, usd: e.target.value }))} style={inputStyle} />
+              </div>
+            </div>
+            <button onClick={setOpeningBalance} style={primaryBtn}>{state.openingBalance?.set ? "Update Opening Balance" : "Set Opening Balance"}</button>
+
+            <div style={{ marginTop: "32px", fontSize: "11px", color: "#666662", lineHeight: 1.7 }}>
+              Total Balance = Opening Balance + all income since − all expenses since, with BTC re-valued at current market price.
+              Per-stream growth tracking (Dropshipping, GB Hosting, etc.) is unaffected by this — it only tracks income logged after this point.
             </div>
           </div>
         )}
